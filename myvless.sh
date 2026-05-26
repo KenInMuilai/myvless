@@ -7,6 +7,7 @@ set -e
 # System: Alpine Linux 3.21
 # Core: Xray-core
 # Service Manager: OpenRC
+# Shortcut: v
 # ============================================================
 
 XRAY_CONFIG_DIR="/etc/xray"
@@ -14,6 +15,11 @@ XRAY_CONFIG_FILE="/etc/xray/config.json"
 XRAY_BIN="/usr/local/bin/xray"
 XRAY_LOG_DIR="/var/log/xray"
 XRAY_SERVICE="/etc/init.d/xray"
+NODE_ENV_FILE="/etc/xray/node.env"
+SHORTCUT_BIN="/usr/local/bin/v"
+
+DEFAULT_REALITY_DEST="music.apple.com:443"
+DEFAULT_REALITY_SNI="music.apple.com"
 
 echo "============================================================"
 echo " VLESS + Reality Installer for Alpine Linux"
@@ -34,7 +40,7 @@ check_alpine() {
 }
 
 install_dependencies() {
-    echo "[1/7] 安装依赖..."
+    echo "[1/8] 安装依赖..."
 
     apk update
     apk add --no-cache \
@@ -50,7 +56,7 @@ install_dependencies() {
 }
 
 detect_arch() {
-    echo "[2/7] 检测系统架构..."
+    echo "[2/8] 检测系统架构..."
 
     ARCH="$(uname -m)"
 
@@ -81,48 +87,51 @@ detect_arch() {
     echo
 }
 
+random_high_port() {
+    PORT_NUM="$(od -An -N2 -tu2 /dev/urandom | tr -d ' ')"
+    PORT="$((PORT_NUM % 10000 + 50000))"
+    echo "$PORT"
+}
+
 read_config() {
-    echo "[3/7] 配置节点参数..."
+    echo "[3/8] 配置节点参数..."
     echo
 
-    read -r -p "请输入公网 IP 或域名: " PUBLIC_HOST
-    read -r -p "请输入客户端连接的公网端口: " PUBLIC_PORT
-    read -r -p "请输入本机监听端口，NAT 机器一般填写内网映射端口: " LISTEN_PORT
+    printf "请输入公网 IP 或域名: "
+    read -r PUBLIC_HOST
 
     if [ -z "$PUBLIC_HOST" ]; then
         echo "错误：公网 IP 或域名不能为空"
         exit 1
     fi
 
-    if [ -z "$PUBLIC_PORT" ]; then
-        echo "错误：公网端口不能为空"
-        exit 1
-    fi
+    RANDOM_PORT="$(random_high_port)"
 
-    if [ -z "$LISTEN_PORT" ]; then
-        echo "错误：监听端口不能为空"
-        exit 1
-    fi
+    printf "请输入公网端口，直接回车随机高位端口 [%s]: " "$RANDOM_PORT"
+    read -r PUBLIC_PORT
+    PUBLIC_PORT="${PUBLIC_PORT:-$RANDOM_PORT}"
+
+    printf "请输入本机监听端口，直接回车使用公网端口 [%s]: " "$PUBLIC_PORT"
+    read -r LISTEN_PORT
+    LISTEN_PORT="${LISTEN_PORT:-$PUBLIC_PORT}"
 
     echo
-    echo "Reality 伪装目标用于 TLS 握手回落。"
-    echo "建议使用真实存在且支持 TLS 1.3 的网站。"
-    echo "默认使用：www.microsoft.com:443"
+    echo "Reality Target/dest 默认：${DEFAULT_REALITY_DEST}"
+    printf "请输入 Reality Target/dest，直接回车默认 [%s]: " "$DEFAULT_REALITY_DEST"
+    read -r REALITY_DEST
+    REALITY_DEST="${REALITY_DEST:-$DEFAULT_REALITY_DEST}"
+
     echo
-
-    read -r -p "请输入 Reality dest，回车默认 www.microsoft.com:443: " REALITY_DEST
-    REALITY_DEST="${REALITY_DEST:-www.microsoft.com:443}"
-
-    DEFAULT_SNI="$(echo "$REALITY_DEST" | cut -d ':' -f 1)"
-
-    read -r -p "请输入 Reality SNI，回车默认 ${DEFAULT_SNI}: " REALITY_SNI
-    REALITY_SNI="${REALITY_SNI:-$DEFAULT_SNI}"
+    echo "Reality SNI 默认：${DEFAULT_REALITY_SNI}"
+    printf "请输入 Reality SNI，直接回车默认 [%s]: " "$DEFAULT_REALITY_SNI"
+    read -r REALITY_SNI
+    REALITY_SNI="${REALITY_SNI:-$DEFAULT_REALITY_SNI}"
 
     echo
 }
 
 install_xray() {
-    echo "[4/7] 下载并安装 Xray-core..."
+    echo "[4/8] 下载并安装 Xray-core..."
 
     TMP_DIR="$(mktemp -d)"
     cd "$TMP_DIR"
@@ -160,7 +169,7 @@ install_xray() {
 }
 
 generate_config() {
-    echo "[5/7] 生成 VLESS + Reality 配置..."
+    echo "[5/8] 生成 VLESS + Reality 配置..."
 
     mkdir -p "$XRAY_CONFIG_DIR"
     mkdir -p "$XRAY_LOG_DIR"
@@ -226,12 +235,34 @@ generate_config() {
 }
 EOF
 
+    VLESS_LINK="vless://${UUID}@${PUBLIC_HOST}:${PUBLIC_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#VLESS-Reality"
+
+    cat > "$NODE_ENV_FILE" <<EOF
+PUBLIC_HOST="${PUBLIC_HOST}"
+PUBLIC_PORT="${PUBLIC_PORT}"
+LISTEN_PORT="${LISTEN_PORT}"
+UUID="${UUID}"
+FLOW="xtls-rprx-vision"
+NETWORK="tcp"
+SECURITY="reality"
+REALITY_DEST="${REALITY_DEST}"
+REALITY_SNI="${REALITY_SNI}"
+PRIVATE_KEY="${PRIVATE_KEY}"
+PUBLIC_KEY="${PUBLIC_KEY}"
+SHORT_ID="${SHORT_ID}"
+FINGERPRINT="chrome"
+VLESS_LINK="${VLESS_LINK}"
+EOF
+
+    chmod 600 "$NODE_ENV_FILE"
+
     echo "配置文件已生成：$XRAY_CONFIG_FILE"
+    echo "节点信息已保存：$NODE_ENV_FILE"
     echo
 }
 
 install_service() {
-    echo "[6/7] 配置 OpenRC 服务..."
+    echo "[6/8] 配置 OpenRC 服务..."
 
     cat > "$XRAY_SERVICE" <<EOF
 #!/sbin/openrc-run
@@ -260,28 +291,129 @@ EOF
     echo
 }
 
-show_result() {
-    echo "[7/7] 安装完成"
-    echo
+install_shortcut() {
+    echo "[7/8] 安装快捷命令 v..."
 
-    VLESS_LINK="vless://${UUID}@${PUBLIC_HOST}:${PUBLIC_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#Alpine-Reality"
+    cat > "$SHORTCUT_BIN" <<'EOF'
+#!/bin/sh
+
+NODE_ENV_FILE="/etc/xray/node.env"
+XRAY_CONFIG_FILE="/etc/xray/config.json"
+XRAY_LOG_DIR="/var/log/xray"
+
+if [ ! -f "$NODE_ENV_FILE" ]; then
+    echo "未找到节点信息文件：$NODE_ENV_FILE"
+    echo "请先运行安装脚本。"
+    exit 1
+fi
+
+. "$NODE_ENV_FILE"
+
+show_info() {
+    clear
+    echo "============================================================"
+    echo " VLESS + Reality 节点信息"
+    echo "============================================================"
+    echo
+    echo "地址 Host          : ${PUBLIC_HOST}"
+    echo "公网端口 Port      : ${PUBLIC_PORT}"
+    echo "本机监听端口       : ${LISTEN_PORT}"
+    echo "UUID               : ${UUID}"
+    echo "Flow               : ${FLOW}"
+    echo "Network            : ${NETWORK}"
+    echo "Security           : ${SECURITY}"
+    echo "Reality Target     : ${REALITY_DEST}"
+    echo "Reality SNI        : ${REALITY_SNI}"
+    echo "Reality PublicKey  : ${PUBLIC_KEY}"
+    echo "Reality ShortID    : ${SHORT_ID}"
+    echo "Fingerprint        : ${FINGERPRINT}"
+    echo
+    echo "============================================================"
+    echo " 节点链接"
+    echo "============================================================"
+    echo
+    echo "${VLESS_LINK}"
+    echo
+}
+
+show_menu() {
+    echo "============================================================"
+    echo " 管理菜单"
+    echo "============================================================"
+    echo
+    echo " 1. 查看 Xray 状态"
+    echo " 2. 启动 Xray"
+    echo " 3. 停止 Xray"
+    echo " 4. 重启 Xray"
+    echo " 5. 查看端口监听"
+    echo " 6. 查看错误日志"
+    echo " 7. 查看配置文件"
+    echo " 0. 退出"
+    echo
+    printf "请选择: "
+    read -r CHOICE
+
+    case "$CHOICE" in
+        1)
+            rc-service xray status
+            ;;
+        2)
+            rc-service xray start
+            ;;
+        3)
+            rc-service xray stop
+            ;;
+        4)
+            rc-service xray restart
+            ;;
+        5)
+            netstat -lntp | grep xray || true
+            ;;
+        6)
+            tail -n 50 "${XRAY_LOG_DIR}/error.log"
+            ;;
+        7)
+            cat "$XRAY_CONFIG_FILE"
+            ;;
+        0)
+            exit 0
+            ;;
+        *)
+            echo "无效选择"
+            ;;
+    esac
+}
+
+show_info
+show_menu
+EOF
+
+    chmod +x "$SHORTCUT_BIN"
+
+    echo "快捷命令安装完成，以后输入 v 即可呼出节点信息"
+    echo
+}
+
+show_result() {
+    echo "[8/8] 安装完成"
+    echo
 
     echo "============================================================"
     echo " VLESS + Reality 节点信息"
     echo "============================================================"
     echo
-    echo "地址 Host       : ${PUBLIC_HOST}"
-    echo "公网端口 Port   : ${PUBLIC_PORT}"
-    echo "本机监听端口    : ${LISTEN_PORT}"
-    echo "UUID            : ${UUID}"
-    echo "Flow            : xtls-rprx-vision"
-    echo "Network         : tcp"
-    echo "Security        : reality"
-    echo "Reality SNI     : ${REALITY_SNI}"
-    echo "Reality Dest    : ${REALITY_DEST}"
-    echo "Reality PublicKey : ${PUBLIC_KEY}"
-    echo "Reality ShortID   : ${SHORT_ID}"
-    echo "Fingerprint     : chrome"
+    echo "地址 Host          : ${PUBLIC_HOST}"
+    echo "公网端口 Port      : ${PUBLIC_PORT}"
+    echo "本机监听端口       : ${LISTEN_PORT}"
+    echo "UUID               : ${UUID}"
+    echo "Flow               : xtls-rprx-vision"
+    echo "Network            : tcp"
+    echo "Security           : reality"
+    echo "Reality Target     : ${REALITY_DEST}"
+    echo "Reality SNI        : ${REALITY_SNI}"
+    echo "Reality PublicKey  : ${PUBLIC_KEY}"
+    echo "Reality ShortID    : ${SHORT_ID}"
+    echo "Fingerprint        : chrome"
     echo
     echo "============================================================"
     echo " 节点链接"
@@ -290,39 +422,31 @@ show_result() {
     echo "${VLESS_LINK}"
     echo
     echo "============================================================"
+    echo " 快捷命令"
+    echo "============================================================"
+    echo
+    echo "以后输入下面命令即可呼出节点信息："
+    echo
+    echo "  v"
+    echo
+    echo "============================================================"
     echo " 常用命令"
     echo "============================================================"
     echo
-    echo "启动 Xray："
-    echo "  rc-service xray start"
-    echo
-    echo "停止 Xray："
-    echo "  rc-service xray stop"
-    echo
-    echo "重启 Xray："
-    echo "  rc-service xray restart"
-    echo
-    echo "查看状态："
-    echo "  rc-service xray status"
-    echo
-    echo "查看端口监听："
-    echo "  netstat -lntp | grep xray"
-    echo
-    echo "查看日志："
-    echo "  tail -f ${XRAY_LOG_DIR}/error.log"
-    echo
-    echo "配置文件："
-    echo "  ${XRAY_CONFIG_FILE}"
+    echo "启动：rc-service xray start"
+    echo "停止：rc-service xray stop"
+    echo "重启：rc-service xray restart"
+    echo "状态：rc-service xray status"
+    echo "配置：${XRAY_CONFIG_FILE}"
+    echo "日志：${XRAY_LOG_DIR}/error.log"
     echo
     echo "============================================================"
     echo " NAT 机器提醒"
     echo "============================================================"
     echo
-    echo "请确认你的 NAT 面板中已经配置 TCP 端口转发："
+    echo "如果你是 NAT 机器，请确认服务商后台 TCP 端口转发："
     echo
-    echo "  公网 IP:${PUBLIC_PORT}  ->  本机内网 IP:${LISTEN_PORT}"
-    echo
-    echo "Reality/VLESS TCP 模式不需要 UDP。"
+    echo "公网 IP:${PUBLIC_PORT}  ->  本机内网 IP:${LISTEN_PORT}"
     echo
 }
 
@@ -334,6 +458,7 @@ main() {
     install_xray
     generate_config
     install_service
+    install_shortcut
     show_result
 }
 
