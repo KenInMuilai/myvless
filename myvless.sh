@@ -49,7 +49,8 @@ install_dependencies() {
         ca-certificates \
         openssl \
         tzdata \
-        net-tools
+        net-tools \
+        iproute2
 
     echo "依赖安装完成"
     echo
@@ -93,15 +94,56 @@ random_high_port() {
     echo "$PORT"
 }
 
+get_default_ip() {
+    DEFAULT_IP=""
+
+    DEFAULT_IP="$(curl -4 -fsS https://api.ipify.org 2>/dev/null || true)"
+
+    if [ -z "$DEFAULT_IP" ]; then
+        DEFAULT_IP="$(curl -4 -fsS https://ifconfig.me 2>/dev/null || true)"
+    fi
+
+    if [ -z "$DEFAULT_IP" ]; then
+        DEFAULT_IP="$(curl -4 -fsS https://ip.sb 2>/dev/null || true)"
+    fi
+
+    if [ -z "$DEFAULT_IP" ] && command -v ip >/dev/null 2>&1; then
+        DEFAULT_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++){if($i=="src"){print $(i+1); exit}}}')"
+    fi
+
+    echo "$DEFAULT_IP"
+}
+
+format_vless_host() {
+    HOST="$1"
+
+    case "$HOST" in
+        *:*)
+            echo "[$HOST]"
+            ;;
+        *)
+            echo "$HOST"
+            ;;
+    esac
+}
+
 read_config() {
     echo "[3/8] 配置节点参数..."
     echo
 
-    printf "请输入公网 IP 或域名: "
+    AUTO_PUBLIC_HOST="$(get_default_ip)"
+
+    if [ -n "$AUTO_PUBLIC_HOST" ]; then
+        printf "请输入公网 IP 或域名，直接回车默认 [%s]: " "$AUTO_PUBLIC_HOST"
+    else
+        printf "请输入公网 IP 或域名: "
+    fi
+
     read -r PUBLIC_HOST
+    PUBLIC_HOST="${PUBLIC_HOST:-$AUTO_PUBLIC_HOST}"
 
     if [ -z "$PUBLIC_HOST" ]; then
-        echo "错误：公网 IP 或域名不能为空"
+        echo "错误：无法自动获取公网 IP，请手动输入公网 IP 或域名"
         exit 1
     fi
 
@@ -176,9 +218,21 @@ generate_config() {
 
     UUID="$("$XRAY_BIN" uuid)"
 
-    KEYS="$("$XRAY_BIN" x25519)"
-    PRIVATE_KEY="$(echo "$KEYS" | awk '/Private key:/ {print $3}')"
-    PUBLIC_KEY="$(echo "$KEYS" | awk '/Public key:/ {print $3}')"
+    KEYS="$("$XRAY_BIN" x25519 2>/dev/null || true)"
+
+    PRIVATE_KEY="$(printf "%s\n" "$KEYS" | sed -n 's/^Private key:[[:space:]]*//p' | head -n 1)"
+    PUBLIC_KEY="$(printf "%s\n" "$KEYS" | sed -n 's/^Public key:[[:space:]]*//p' | head -n 1)"
+
+    if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
+        echo "错误：Reality 密钥生成失败"
+        echo
+        echo "Xray x25519 输出内容："
+        echo "$KEYS"
+        echo
+        echo "请检查 Xray 是否正常："
+        echo "$XRAY_BIN version"
+        exit 1
+    fi
 
     SHORT_ID="$(openssl rand -hex 8)"
 
@@ -235,7 +289,9 @@ generate_config() {
 }
 EOF
 
-    VLESS_LINK="vless://${UUID}@${PUBLIC_HOST}:${PUBLIC_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#VLESS-Reality"
+    LINK_HOST="$(format_vless_host "$PUBLIC_HOST")"
+
+    VLESS_LINK="vless://${UUID}@${LINK_HOST}:${PUBLIC_PORT}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=${REALITY_SNI}&fp=chrome&pbk=${PUBLIC_KEY}&sid=${SHORT_ID}&type=tcp&headerType=none#VLESS-Reality"
 
     cat > "$NODE_ENV_FILE" <<EOF
 PUBLIC_HOST="${PUBLIC_HOST}"
@@ -258,6 +314,10 @@ EOF
 
     echo "配置文件已生成：$XRAY_CONFIG_FILE"
     echo "节点信息已保存：$NODE_ENV_FILE"
+    echo
+    echo "Reality PrivateKey: ${PRIVATE_KEY}"
+    echo "Reality PublicKey : ${PUBLIC_KEY}"
+    echo "Reality ShortID   : ${SHORT_ID}"
     echo
 }
 
@@ -309,6 +369,12 @@ fi
 
 . "$NODE_ENV_FILE"
 
+pause_return() {
+    echo
+    printf "按回车返回菜单..."
+    read -r _
+}
+
 show_info() {
     clear
     echo "============================================================"
@@ -336,7 +402,10 @@ show_info() {
     echo
 }
 
-show_menu() {
+while true
+do
+    show_info
+
     echo "============================================================"
     echo " 管理菜单"
     echo "============================================================"
@@ -348,6 +417,7 @@ show_menu() {
     echo " 5. 查看端口监听"
     echo " 6. 查看错误日志"
     echo " 7. 查看配置文件"
+    echo " 8. 查看节点链接"
     echo " 0. 退出"
     echo
     printf "请选择: "
@@ -356,36 +426,46 @@ show_menu() {
     case "$CHOICE" in
         1)
             rc-service xray status
+            pause_return
             ;;
         2)
             rc-service xray start
+            pause_return
             ;;
         3)
             rc-service xray stop
+            pause_return
             ;;
         4)
             rc-service xray restart
+            pause_return
             ;;
         5)
             netstat -lntp | grep xray || true
+            pause_return
             ;;
         6)
-            tail -n 50 "${XRAY_LOG_DIR}/error.log"
+            tail -n 80 "${XRAY_LOG_DIR}/error.log" || true
+            pause_return
             ;;
         7)
             cat "$XRAY_CONFIG_FILE"
+            pause_return
+            ;;
+        8)
+            echo
+            echo "${VLESS_LINK}"
+            pause_return
             ;;
         0)
             exit 0
             ;;
         *)
             echo "无效选择"
+            pause_return
             ;;
     esac
-}
-
-show_info
-show_menu
+done
 EOF
 
     chmod +x "$SHORTCUT_BIN"
@@ -425,7 +505,7 @@ show_result() {
     echo " 快捷命令"
     echo "============================================================"
     echo
-    echo "以后输入下面命令即可呼出节点信息："
+    echo "以后输入下面命令即可呼出节点信息和管理菜单："
     echo
     echo "  v"
     echo
@@ -447,6 +527,8 @@ show_result() {
     echo "如果你是 NAT 机器，请确认服务商后台 TCP 端口转发："
     echo
     echo "公网 IP:${PUBLIC_PORT}  ->  本机内网 IP:${LISTEN_PORT}"
+    echo
+    echo "注意：脚本自动获取的是出口公网 IP，但 NAT 机器必须有端口映射才能连接。"
     echo
 }
 
